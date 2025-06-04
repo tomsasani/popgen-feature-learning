@@ -24,8 +24,8 @@ H, W = 32, 32
 CHANNELS = 1
 INPUT_DIM = H * W
 LR = 5e-4
-EPOCHS = 25
-HIDDEN_DIMS = [16, 32, 64, 128]
+EPOCHS = 10
+HIDDEN_DIMS = [32, 64]
 DEVICE = torch.device("mps")
 
 
@@ -55,6 +55,44 @@ class RandomSiteMaskingTransform(torch.nn.Module):
 
         masked_x = x * mask  # Broadcast across channels
         return masked_x
+    
+class RandomRepolarizationTransform(torch.nn.Module):
+    def __init__(self, repol_prob=0.25):
+        """
+        Args:
+            mask_ratio (float): Fraction of pixels to mask (set to zero).
+        """
+        self.repol_prob = repol_prob
+
+    def __call__(self, x):
+        """
+        Args:
+            x (torch.Tensor): Image tensor of shape (C, H, W).
+        Returns:
+            masked_x (torch.Tensor): Image with random pixels zeroed out.
+            mask (torch.Tensor): Mask tensor of shape (1, H, W) with 1s where pixels are kept, 0s where masked.
+        """
+        C, H, W = x.shape
+        n_sites = int(self.repol_prob * W)
+
+        # randomly select sites to repolarize
+        mask_sites = torch.randperm(W, dtype=int)[:n_sites]
+
+        # create copy of the input array
+        # NOTE: won't work if we're dealing with distance channel
+        x_copy = x
+        x_copy[:, :, mask_sites] = 1 - x[:, :, mask_sites]
+
+        return x_copy
+
+class ContrastiveTransformations(object):
+
+    def __init__(self, base_transforms, n_views=2):
+        self.base_transforms = base_transforms
+        self.n_views = n_views
+
+    def __call__(self, x):
+        return [self.base_transforms(x) for i in range(self.n_views)]
 
 
 def train_loop(
@@ -168,30 +206,21 @@ img_tfms.extend(
                 ),
             ]
         ),
-        RandomSiteMaskingTransform(mask_ratio=0.25),
+        RandomRepolarizationTransform(repol_prob=0.5),
+        RandomSiteMaskingTransform(mask_ratio=0.5),
     ]
 )
 
 
-class ContrastiveTransformations(object):
-
-    def __init__(self, base_transforms, n_views=2):
-        self.base_transforms = base_transforms
-        self.n_views = n_views
-
-    def __call__(self, x):
-        return [self.base_transforms(x) for i in range(self.n_views)]
-
-
 img_tfms = transforms.Compose(img_tfms)
 
-train = MNIST(
+train = FashionMNIST(
     "data/",
     transform=ContrastiveTransformations(img_tfms, n_views=2),
     train=True,
     download=True,
 )
-test = MNIST(
+test = FashionMNIST(
     "data/",
     transform=ContrastiveTransformations(img_tfms, n_views=2),
     train=False,
@@ -319,7 +348,7 @@ img_tfms.extend(
 img_tfms = transforms.Compose(img_tfms)
 
 
-test = MNIST(
+test = FashionMNIST(
     "data/",
     transform=img_tfms,
     train=False,

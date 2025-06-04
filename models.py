@@ -17,6 +17,7 @@ class ConvBlock2D(nn.Module):
         batch_norm: bool = True,
         activation: bool = True,
         bias: bool = False,
+        pool: bool = True,
     ):
         super(ConvBlock2D, self).__init__()
         conv = nn.Conv2d(
@@ -29,12 +30,19 @@ class ConvBlock2D(nn.Module):
         )
         relu = nn.ReLU()
         norm = nn.BatchNorm2d(out_channels)
+        pooling = nn.MaxPool2d(
+            kernel_size=(1, 2),
+            stride=(1, 2),
+        )
         layers = [conv]
+        if pool:
+            layers.append(pooling)
         if activation:
             layers.append(relu)
         if batch_norm:
             layers.append(norm)
         self.block = nn.Sequential(*layers)
+
     def forward(self, x):
         return self.block(x)
 
@@ -71,9 +79,9 @@ class ConvTransposeBlock2D(nn.Module):
         if batch_norm:
             layers.append(norm)
         self.block = nn.Sequential(*layers)
+
     def forward(self, x):
         return self.block(x)
-    
 
 
 class Encoder1D(nn.Module):
@@ -97,6 +105,7 @@ class Encoder1D(nn.Module):
 
         bias = True
         batch_norm = True
+        pool = True
 
         # figure out final size of image after convolutions.
         # NOTE: we assume square convolutional kernels
@@ -109,9 +118,13 @@ class Encoder1D(nn.Module):
             and kernel_size[0] > 1
         ):
             out_H //= 2 ** len(hidden_dims)
+            if pool:
+                out_H //= 2 ** len(hidden_dims)
 
         if collapse:
             out_H = 1
+        if pool:
+            out_W //= 2 ** len(hidden_dims)
 
         encoder_blocks = []
         for h_dim in hidden_dims:
@@ -125,6 +138,7 @@ class Encoder1D(nn.Module):
                 batch_norm=batch_norm,
                 activation=True,
                 bias=bias,
+                pool=pool,
             )
             encoder_blocks.append(block)
             in_channels = h_dim
@@ -138,10 +152,9 @@ class Encoder1D(nn.Module):
             latent_dim,
             bias=bias,
         )
-        
+
         self.relu = nn.ReLU()
         self.flatten = nn.Flatten()
-
 
     def forward(self, x):
         x = self.encoder_conv(x)
