@@ -9,7 +9,9 @@ import seaborn as sns
 from PIL import Image
 
 
-PARAM_NAMES = ["N1", "N2", "T1", "T2", "growth"]
+PARAM_NAMES = ["rho"]
+PARAM_NAMES = ["N1", "N2", "T1", "T2"]
+
 # initialize basic engine
 engine = generator_fake.Generator(
     demographies.simulate_exp,
@@ -17,8 +19,8 @@ engine = generator_fake.Generator(
     42,
     convert_to_rgb=True,
     permute=False,
-    n_snps=32,
-    convert_to_diploid=True,
+    n_snps=64,
+    convert_to_diploid=False,
     seqlen=50_000,
     sort=True,
     filter_singletons=False,
@@ -28,15 +30,16 @@ sim_params = params.ParamSet()
 rng = np.random.default_rng(42)
 
 PARAM_VALUES = [
-    [23_231, 29_962, 4_870, 581, 0.00531],  # YRI
-    [22_552, 3_313, 3_589, 1_050, 0.00535],  # CEU
-    [9_000, 5_000, 1_500, 350, 0.005],  # CHB
+    [23_231, 29_962, 4_870, 581],  # YRI
+    [22_552, 3_313, 3_589, 1_050],  # CEU
+    # [9_000, 5_000, 1_500, 350],  # CHB
 ]
+
+# PARAM_VALUES = [[1e-8], [1e-9], [5e-9]]
 
 
 N_SMPS = 32
 total_regions = 15_000 / len(PARAM_VALUES)
-
 
 for model_i in range(len(PARAM_VALUES)):
     counted = 0
@@ -64,8 +67,8 @@ for model_i in range(len(PARAM_VALUES)):
             f.savefig("region.png")
             plt.close()
 
-        # region = np.transpose(region[0, :, :, :], (1, 2, 0))
-        region = region[0, 0, :, :]
+        region = np.transpose(region[0, :, :, :], (1, 2, 0))
+        region = region[:, :, 0]
         region = np.uint8(region * 255)
 
         img = Image.fromarray(region, mode="L")
