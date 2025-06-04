@@ -256,7 +256,8 @@ STRIDE = (1, 2)
 
 model = models.Encoder1D(
     in_channels=CHANNELS,
-    latent_dim=LATENT_DIM,
+    enc_dim=128,
+    proj_dim=32,
     kernel_size=KERNEL_SIZE,
     stride=STRIDE,
     padding=PADDING,

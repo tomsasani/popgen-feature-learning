@@ -85,17 +85,19 @@ class ConvTransposeBlock2D(nn.Module):
 
 
 class Encoder1D(nn.Module):
+
     def __init__(
         self,
         *,
         in_channels: int,
-        latent_dim: int,
+        enc_dim: int,
+        proj_dim: int,
         kernel_size: Union[int, Tuple[int]] = 3,
         stride: Union[int, Tuple[int]] = 2,
         padding: Union[int, Tuple[int]] = 1,
         hidden_dims: List[int] = None,
         in_HW: Tuple[int] = (16, 16),
-        collapse: bool=False
+        collapse: bool = False,
     ) -> None:
 
         super(Encoder1D, self).__init__()
@@ -104,7 +106,7 @@ class Encoder1D(nn.Module):
         self.collapse = collapse
 
         bias = True
-        batch_norm = True
+        batch_norm = False
         pool = True
 
         # figure out final size of image after convolutions.
@@ -149,7 +151,12 @@ class Encoder1D(nn.Module):
         # need to adjust expected output dims
         self.fc = nn.Linear(
             hidden_dims[-1] * out_H * out_W,
-            latent_dim,
+            enc_dim,
+            bias=bias,
+        )
+        self.proj = nn.Linear(
+            enc_dim,
+            proj_dim,
             bias=bias,
         )
 
@@ -166,8 +173,10 @@ class Encoder1D(nn.Module):
         x = self.flatten(x)
         # split the result into mu and var components
         # of the latent Gaussian distribution
-        out = self.fc(x)
-        return out
+        enc = self.fc(x)
+        enc = self.relu(enc)
+        proj = self.proj(enc)
+        return proj
 
 class Encoder(nn.Module):
     def __init__(
