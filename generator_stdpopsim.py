@@ -53,19 +53,8 @@ class Generator:
 
         region = None
 
-        # initialize the collection of parameters
-        sim_params = params.ParamSet()
-        if treat_as_real:
-            pass
-        elif param_values == []:
-            pass
-        else:
-            sim_params.update(self.param_names, param_values)
-
         ts = self.simulator(
-            sim_params,
             sample_sizes,
-            self.rng,
             seqlen=self.seqlen,
         )
 
@@ -74,16 +63,9 @@ class Generator:
             filter_singletons=self.filter_singletons,
         )
 
-        X = X.T
-
-        X = util.major_minor(X)
-
-        ref_alleles = np.zeros_like(positions)
-
         region = util.process_region(
             X,
             positions,
-            ref_alleles,
             convert_to_rgb=self.convert_to_rgb,
             n_snps=self.n_snps,
             norm_len=global_vars.L,

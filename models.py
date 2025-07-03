@@ -3,480 +3,271 @@ from torch import nn
 from typing import List, Tuple, Union
 import torchvision
 import torchvision.transforms.functional
+import math
 
 
-class ConvBlock2D(nn.Module):
+DEVICE = torch.device("cuda")
+
+class ColumnTokenizer(torch.nn.Module):
+
     def __init__(
         self,
-        *,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int]],
-        stride: Union[int, Tuple[int]],
-        padding: Union[int, Tuple[int]],
-        batch_norm: bool = True,
-        activation: bool = True,
-        bias: bool = False,
-        pool: bool = True,
+        input_channels: int = 1,
+        input_width: int = 32,
+        hidden_size: int = 192,
     ):
-        super(ConvBlock2D, self).__init__()
-        conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=bias,
-        )
-        relu = nn.ReLU()
-        norm = nn.BatchNorm2d(out_channels)
-        pooling = nn.MaxPool2d(
-            kernel_size=(1, 2),
-            stride=(1, 2),
-        )
-        layers = [conv]
-        if pool:
-            layers.append(pooling)
-        if activation:
-            layers.append(relu)
-        if batch_norm:
-            layers.append(norm)
-        self.block = nn.Sequential(*layers)
+        super().__init__()
+
+        self.input_dim = input_channels * input_width
+        self.hidden_size = hidden_size
+        # simple linear projection
+        self.proj = torch.nn.Linear(self.input_dim, hidden_size)
 
     def forward(self, x):
-        return self.block(x)
+        # shape should be (B, C, H, W) where H is the number
+        # of haplotypes and W is the number of SNPs
+        B, C, H, W = x.shape
+        # permute to (B, H, C, W)
+        x = x.permute(0, 2, 1, 3)
+        # print (x.shape)
+        # then, flatten each "patch" of C * W such that
+        # each patch is 1D and size (C * W).
+        x = x.reshape(B, H, -1)
+        # print (x.shape)
+        # embed "patches" of size (C * W, effectively a 1d
+        # array equivalent to the number of SNPs)
+        tokens = self.proj(x)
+        return tokens
 
 
-class ConvTransposeBlock2D(nn.Module):
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int]],
-        stride: Union[int, Tuple[int]],
-        padding: Union[int, Tuple[int]],
-        output_padding: Union[int, Tuple[int]],
-        batch_norm: bool = True,
-        activation: bool = True,
-        bias: bool = False,
-    ):
-        super(ConvTransposeBlock2D, self).__init__()
-        conv = nn.ConvTranspose2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            output_padding=output_padding,
-            bias=bias,
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.attn_proj = nn.Linear(hidden_dim, 1)
+
+    def forward(self, hidden_states, attention_mask=None):
+        # hidden_states: [batch_size, seq_len, hidden_dim]
+        scores = self.attn_proj(hidden_states).squeeze(-1)  # [batch_size, seq_len]
+
+        if attention_mask is not None:
+            # Apply a large negative value to masked positions before softmax
+            scores = scores.masked_fill(attention_mask == 0, -1e9)
+
+        attn_weights = nn.functional.softmax(scores, dim=1)  # [batch_size, seq_len]
+        attn_weights = attn_weights.unsqueeze(-1)  # [batch_size, seq_len, 1]
+
+        # Weighted sum of hidden states
+        pooled = torch.sum(hidden_states * attn_weights, dim=1)  # [batch_size, hidden_dim]
+        return pooled
+
+class SelfAttention(nn.Module):
+    def __init__(self, embed_dim: int = 192, num_heads: int = 1, mlp_hidden_dim_ratio: int = 2):
+        super().__init__()
+
+        self.attn = nn.MultiheadAttention(
+            embed_dim,
+            num_heads,
+            batch_first=True,
         )
-        relu = nn.ReLU()
-        norm = nn.BatchNorm2d(out_channels)
-        layers = [conv]
-        if activation:
-            layers.append(relu)
-        if batch_norm:
-            layers.append(norm)
-        self.block = nn.Sequential(*layers)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * mlp_hidden_dim_ratio),
+            nn.GELU(),
+            nn.Dropout(0.),
+            nn.Linear(embed_dim * mlp_hidden_dim_ratio, embed_dim),
+            nn.Dropout(0.),
+        )
+
 
     def forward(self, x):
-        return self.block(x)
+        # x shape: (batch_size, seq_len, embed_dim)
+        x_norm = self.norm(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)  # Self-attention: Q = K = V = x
+        x = x + attn_out
+        x_norm = self.norm(x)
+        return x + self.mlp(x_norm)
 
 
-class Encoder1D(nn.Module):
+class BabyTransformer(torch.nn.Module):
+    def __init__(
+        self,
+        width: int = 32,
+        in_channels: int = 1,
+        num_heads: int = 1,
+        hidden_size: int = 128,
+        num_classes: int = 2,
+        attention_pool: bool = False,
+        depth: int = 4,
+        mlp_ratio: int = 2,
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.pooling = AttentionPooling(hidden_size)
+        self.attention_pool = attention_pool
+        self.norm = nn.LayerNorm(hidden_size)
+
+        # we use a "custom" tokenizer that takes
+        # patches of size (C * W), where W is the
+        # number of SNPs
+        self.tokenizer = ColumnTokenizer(
+            input_channels=in_channels,
+            input_width=width,
+            hidden_size=hidden_size,
+        )
+
+        self.attention = nn.Sequential(
+            *[
+                SelfAttention(
+                    embed_dim=hidden_size,
+                    num_heads=num_heads,
+                    mlp_hidden_dim_ratio=mlp_ratio,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+        # linear classifier head
+        self.classifier = torch.nn.Linear(
+            hidden_size,
+            num_classes,
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # print (x.shape)
+        x = self.tokenizer(x)  # (B, H, hidden_size)
+        # print (x.shape)
+        # pass through transformer encoder
+        x = self.attention(x)
+        # classification head on the average or attention-pooled
+        # final embeddings (no CLS token)
+        x = self.norm(x)
+        if self.attention_pool:
+            cls_output = self.pooling(x)
+        else:
+            cls_output = torch.mean(x, dim=1)
+        logits = self.classifier(cls_output)  
+
+        return logits
+
+class BasicPredictor(nn.Module):
 
     def __init__(
         self,
         *,
         in_channels: int,
-        enc_dim: int,
-        proj_dim: int,
-        kernel_size: Union[int, Tuple[int]] = 3,
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
+        kernel: Union[int, Tuple[int]] = 3,
         hidden_dims: List[int] = None,
-        in_HW: Tuple[int] = (16, 16),
-        collapse: bool = False,
+        agg: Union[str, None] = "max",
+        width: int = 32,
+        projection_dim: int = 32,
+        encoding_dim: int = 256,
+        pool: bool = False,
+        batch_norm: bool = False,
+        padding: int = 0,
     ) -> None:
 
-        super(Encoder1D, self).__init__()
+        super(BasicPredictor, self).__init__()
 
-        self.latent_dim = latent_dim
-        self.collapse = collapse
+        self.agg = agg
+        self.width = width
 
-        bias = True
-        batch_norm = False
-        pool = True
+        _stride = (1, 2)
+        _padding = (0, padding)
 
-        # figure out final size of image after convolutions.
-        # NOTE: we assume square convolutional kernels
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
+        out_W = width
+        out_H = 1
+
+        encoder_blocks = []
+        for h_dim in hidden_dims:
+            # initialize convolutional block
+            block = [
+                nn.Conv2d(
+                    in_channels,
+                    h_dim,
+                    kernel_size=kernel,
+                    stride=_stride,
+                    padding=_padding,
+                ),
+                nn.ReLU(),
+            ]
+
+            out_W = math.floor((out_W - kernel[1] + (2 * (_padding[1]))) / _stride[1]) + 1
+
+            if batch_norm:
+                block.append(nn.BatchNorm2d(h_dim))
             if pool:
-                out_H //= 2 ** len(hidden_dims)
+                block.append(
+                    nn.MaxPool2d(
+                        kernel_size=(1, 2),
+                        stride=(1, 2),
+                    )
+                )
+                out_W //= 2
 
-        if collapse:
-            out_H = 1
-        if pool:
-            out_W //= 2 ** len(hidden_dims)
-
-        encoder_blocks = []
-        for h_dim in hidden_dims:
-            # initialize convolutional block
-            block = ConvBlock2D(
-                in_channels=in_channels,
-                out_channels=h_dim,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                batch_norm=batch_norm,
-                activation=True,
-                bias=bias,
-                pool=pool,
-            )
-            encoder_blocks.append(block)
             in_channels = h_dim
+            encoder_blocks.extend(block)
 
         self.encoder_conv = nn.Sequential(*encoder_blocks)
-
-        # if we collapse by haplotype to be permutation-invariant,
-        # need to adjust expected output dims
-        self.fc = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            enc_dim,
-            bias=bias,
+        self.encode = nn.Sequential(
+            nn.Linear(hidden_dims[-1] * out_W * out_H, encoding_dim),
+            nn.ReLU(),
+            # nn.BatchNorm1d(encoding_dim),
+            nn.Dropout(0.),
+            nn.Linear(encoding_dim, encoding_dim),
+            nn.ReLU(),
+            # nn.BatchNorm1d(encoding_dim),
+            nn.Dropout(0.),
+            
         )
-        self.proj = nn.Linear(
-            enc_dim,
-            proj_dim,
-            bias=bias,
+        # two projection layers with batchnorm
+        self.project = nn.Sequential(
+            nn.Linear(encoding_dim, projection_dim),
         )
-
-        self.relu = nn.ReLU()
         self.flatten = nn.Flatten()
 
     def forward(self, x):
         x = self.encoder_conv(x)
-        if self.collapse:
-            # take the average across haplotypes
-            x = torch.mean(x, dim=2).unsqueeze(dim=2)
+        # take the average across haplotypes
+        if self.agg == "mean":
+            x = torch.mean(x, dim=2)
+        elif self.agg == "max":
+            x = torch.amax(x, dim=2)
+        elif self.agg is None:
+            pass
         # flatten, but ignore batch
-        # x = torch.flatten(x, start_dim=1)
         x = self.flatten(x)
-        # split the result into mu and var components
-        # of the latent Gaussian distribution
-        enc = self.fc(x)
-        enc = self.relu(enc)
-        proj = self.proj(enc)
-        return proj
+        encoded = self.encode(x)
+        projection = self.project(encoded)
 
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        latent_dim: int,
-        kernel_size: Union[int, Tuple[int]] = 3,
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
-        hidden_dims: List[int] = None,
-        in_HW: Tuple[int] = (16, 16),
-    ) -> None:
+        return projection
 
-        super(Encoder, self).__init__()
-
-        self.latent_dim = latent_dim
-
-        bias = True
-        batch_norm = True
-
-        # figure out final size of image after convolutions.
-        # NOTE: we assume square convolutional kernels
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        encoder_blocks = []
-        for h_dim in hidden_dims:
-            # initialize convolutional block
-            block = ConvBlock2D(
-                in_channels=in_channels,
-                out_channels=h_dim,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                batch_norm=batch_norm,
-                activation=True,
-                bias=bias,
-            )
-            encoder_blocks.append(block)
-            in_channels = h_dim
-
-        self.encoder_conv = nn.Sequential(*encoder_blocks)
-
-        self.fc_mu = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            latent_dim,
-            bias=bias,
-        )
-        self.fc_var = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            latent_dim,
-            bias=bias,
-        )
-        self.relu = nn.ReLU()
-        self.flatten = nn.Flatten()
-
-
-    def forward(self, x):
-        x = self.encoder_conv(x)
-        # flatten, but ignore batch
-        # x = torch.flatten(x, start_dim=1)
-        x = self.flatten(x)
-        # split the result into mu and var components
-        # of the latent Gaussian distribution
-        mu = self.fc_mu(x)
-        log_var = self.fc_var(x)
-        return [mu, log_var]
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        out_channels: int,
-        latent_dim: int,
-        kernel_size: Union[int, Tuple[int]] = (3, 3),
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
-        output_padding: Union[int, Tuple[int]] = 1,
-        hidden_dims: List[int] = None,
-        in_HW: Tuple[int] = (32, 32),
-    ) -> None:
-        super(Decoder, self).__init__()
-
-        bias = True
-        batch_norm = True
-
-        # figure out final dimension to which we
-        # need to reshape our filters before decoding
-        self.final_dim = hidden_dims[-1]
-
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        self.out_H = out_H
-        self.out_W = out_W
-
-        self.decoder_input = nn.Linear(
-            latent_dim,
-            hidden_dims[-1] * out_H * out_W,
-            bias=bias,
-        )
-        self.batch_norm = nn.BatchNorm1d(hidden_dims[-1] * out_H * out_W)
-
-        decoder_blocks = []
-        hidden_dims.reverse()
-        # loop over hidden dims in reverse
-        for i in range(len(hidden_dims) - 1):
-            block = ConvTransposeBlock2D(
-                in_channels=hidden_dims[i],
-                out_channels=hidden_dims[i + 1],
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-                batch_norm=batch_norm,
-                activation=True,
-                bias=bias,
-            )
-            decoder_blocks.append(block)
-
-        self.decoder_conv = nn.Sequential(*decoder_blocks)
-        self.relu = nn.ReLU()
-
-        # NOTE: no batch norm and no ReLu in final block
-        final_block = [
-            ConvTransposeBlock2D(
-                in_channels=hidden_dims[-1],
-                out_channels=hidden_dims[-1],
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding,
-                batch_norm=batch_norm,
-                activation=True,
-                bias=bias,
-            ),
-            ConvBlock2D(
-                in_channels=hidden_dims[-1],
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=(1, 1),
-                padding=padding,
-                batch_norm=batch_norm,
-                activation=False,
-                bias=bias,
-            ),
-        ]
-
-        self.final = nn.Sequential(*final_block)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, z: torch.Tensor):
-        # fc from latent to intermediate
-        x = self.decoder_input(z)
-        # x = self.relu(x)
-
-        # reshape
-        x = x.view((-1, self.final_dim, self.out_H, self.out_W))
-
-        decoded = self.decoder_conv(x)
-        decoded = self.final(decoded)
-        decoded = self.sigmoid(decoded)
-
-        return decoded
-class VAE(nn.Module):
-
-    def __init__(
-        self,
-        encoder,
-        decoder,
-        discriminator,
-    ) -> None:
-        super(VAE, self).__init__()
-
-        self.encoder = encoder
-        self.decoder = decoder
-        self.discriminator = discriminator
-
-    def reparameterize(
-        self,
-        mu: torch.Tensor,
-        log_var: torch.Tensor,
-    ) -> torch.Tensor:
-
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-
-        return eps * std + mu
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """
-        Encodes the input by passing through the encoder network
-        and returns the latent codes.
-        :param input: (Tensor) Input tensor to encoder [N x C x H x W]
-        :return: (Tensor) List of latent codes
-        """
-        mu, log_var = self.encoder(x)
-        z = self.reparameterize(mu, log_var)
-        decoded = self.decoder(z)
-
-        return [decoded, mu, log_var, z]
-
-
-class Discriminator(nn.Module):
-    def __init__(
-        self,
-        *,
-        in_channels: int,
-        kernel_size: Union[int, Tuple[int]] = 3,
-        stride: Union[int, Tuple[int]] = 2,
-        padding: Union[int, Tuple[int]] = 1,
-        hidden_dims: List[int] = None,
-        in_HW: Tuple[int] = (16, 16),
-    ) -> None:
-
-        super(Discriminator, self).__init__()
-
-        bias = True
-        batch_norm = True
-
-        # figure out final size of image after convolutions.
-        # NOTE: we assume square convolutional kernels
-        out_H, out_W = in_HW
-        out_W //= 2 ** len(hidden_dims)
-        # image height will only decrease if we're using square filters
-        if type(kernel_size) is int or (
-            len(kernel_size) > 1
-            and kernel_size[0] == kernel_size[1]
-            and kernel_size[0] > 1
-        ):
-            out_H //= 2 ** len(hidden_dims)
-
-        encoder_blocks = []
-        for h_dim in hidden_dims:
-            # initialize convolutional block
-            block = ConvBlock2D(
-                in_channels=in_channels,
-                out_channels=h_dim,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                batch_norm=batch_norm,
-                activation=True,
-                bias=bias,
-            )
-            encoder_blocks.append(block)
-            in_channels = h_dim
-
-        self.encoder_conv = nn.Sequential(*encoder_blocks)
-
-        self.fc = nn.Linear(
-            hidden_dims[-1] * out_H * out_W,
-            1,
-            bias=bias,
-        )
-
-        self.relu = nn.ReLU()
-        self.flatten = nn.Flatten()
-
-    def forward(self, x):
-        x = self.encoder_conv(x)
-        # flatten, but ignore batch
-        # x = torch.flatten(x, start_dim=1)
-        x = self.flatten(x)
-        # split the result into mu and var components
-        # of the latent Gaussian distribution
-        x = self.fc(x)
-        return x
 
 if __name__ == "__main__":
 
-    model = Encoder1D(
+    DEVICE = torch.device("cpu")
+
+
+    model = BasicPredictor(
         in_channels=1,
-        latent_dim=2,
-        kernel_size=(1, 3),
-        stride=(1, 2),
-        padding=(0, 1),
-        in_HW=(64, 64),
-        hidden_dims=[8, 16],
-        collapse=True,
+        kernel=(1, 5),
+        hidden_dims=[32, 64],
+        agg="mean",
+        width=36,
+        encoding_dim=192,
+        projection_dim=3,
+        pool=True,
+        batch_norm=False,
+        padding=0,
+        
     )
+    print (model)
+    model = model.to(DEVICE)
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print (pytorch_total_params)
 
-    model = model.to("mps")
-
-    test = torch.rand(size=(100, 1, 64, 64)).to("mps")
-    out = model(test)
-    print (out)
+    test = torch.rand(size=(100, 1, 200, 36)).to(DEVICE)
+    proj = model(test)
+    print (proj.shape)
