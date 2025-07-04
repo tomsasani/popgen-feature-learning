@@ -61,7 +61,13 @@ class AttentionPooling(nn.Module):
         return pooled
 
 class SelfAttention(nn.Module):
-    def __init__(self, embed_dim: int = 192, num_heads: int = 1, mlp_hidden_dim_ratio: int = 2):
+
+    def __init__(
+        self,
+        embed_dim: int = 192,
+        num_heads: int = 1,
+        mlp_hidden_dim_ratio: int = 2,
+    ):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(
@@ -78,7 +84,6 @@ class SelfAttention(nn.Module):
             nn.Linear(embed_dim * mlp_hidden_dim_ratio, embed_dim),
             nn.Dropout(0.),
         )
-
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, embed_dim)
@@ -162,9 +167,8 @@ class BasicPredictor(nn.Module):
         hidden_dims: List[int] = None,
         agg: Union[str, None] = "max",
         width: int = 32,
-        projection_dim: int = 32,
+        num_classes: int = 32,
         encoding_dim: int = 256,
-        pool: bool = False,
         batch_norm: bool = False,
         padding: int = 0,
     ) -> None:
@@ -178,9 +182,8 @@ class BasicPredictor(nn.Module):
         _padding = (0, padding)
 
         out_W = width
-        out_H = 1
 
-        encoder_blocks = []
+        conv = []
         for h_dim in hidden_dims:
             # initialize convolutional block
             block = [
@@ -192,39 +195,35 @@ class BasicPredictor(nn.Module):
                     padding=_padding,
                 ),
                 nn.ReLU(),
+                nn.MaxPool2d(
+                    kernel_size=(1, 2),
+                    stride=(1, 2),
+                ),
             ]
 
-            out_W = math.floor((out_W - kernel[1] + (2 * (_padding[1]))) / _stride[1]) + 1
+            out_W = (
+                math.floor((out_W - kernel[1] + (2 * (padding))) / _stride[1]) + 1
+            )
 
             if batch_norm:
                 block.append(nn.BatchNorm2d(h_dim))
-            if pool:
-                block.append(
-                    nn.MaxPool2d(
-                        kernel_size=(1, 2),
-                        stride=(1, 2),
-                    )
-                )
-                out_W //= 2
 
+            # account for max pooling
+            out_W //= 2
             in_channels = h_dim
-            encoder_blocks.extend(block)
+            conv.extend(block)
 
-        self.encoder_conv = nn.Sequential(*encoder_blocks)
-        self.encode = nn.Sequential(
-            nn.Linear(hidden_dims[-1] * out_W * out_H, encoding_dim),
+        self.conv = nn.Sequential(*conv)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dims[-1] * out_W, encoding_dim),
             nn.ReLU(),
-            # nn.BatchNorm1d(encoding_dim),
-            nn.Dropout(0.),
             nn.Linear(encoding_dim, encoding_dim),
             nn.ReLU(),
-            # nn.BatchNorm1d(encoding_dim),
-            nn.Dropout(0.),
             
         )
         # two projection layers with batchnorm
         self.project = nn.Sequential(
-            nn.Linear(encoding_dim, projection_dim),
+            nn.Linear(encoding_dim, num_classes),
         )
         self.flatten = nn.Flatten()
 
@@ -256,7 +255,7 @@ if __name__ == "__main__":
         hidden_dims=[32, 64],
         agg="mean",
         width=36,
-        encoding_dim=192,
+        encoding_dim=128,
         projection_dim=3,
         pool=True,
         batch_norm=False,
