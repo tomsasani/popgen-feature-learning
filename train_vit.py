@@ -62,7 +62,7 @@ def plot_example(
         axarr[axi].set_ylabel("Haplotypes", size=14)
 
         axarr[axi].set_title(
-            r"$\rho = 2 \times 10^{-9}$" if axi == 0 else r"$\rho = 1 \times 10^{-8}$"
+            r"$\rho = 1 \times 10^{-9}$" if axi == 0 else r"$\rho = 1 \times 10^{-8}$"
         )
     f.tight_layout()
     f.savefig(plot_name, dpi=200)
@@ -70,7 +70,6 @@ def plot_example(
 
 
 ITERATIONS = 1_000
-N_SMPS = 32
 DEVICE = torch.device("cuda")
 
 def main(config=None):
@@ -78,22 +77,18 @@ def main(config=None):
     # Choose species and model
     species = stdpopsim.get_species("HomSap")
     demography = species.get_demographic_model("OutOfAfrica_3G09")
-
+    chrom = species.genome.get_chromosome("chr22")
     RHO = [1e-9, 1e-8, 1e-7]
 
     contigs = [
         species.get_contig(
+            # chromosome="chr22",
             length=50_000,
             recombination_rate=r,
             mutation_rate=2.35e-8,
         )
         for r in RHO
     ]
-
-    samples_per_population = [0, 0, 0]
-    # use a CEU population
-    samples_per_population[1] = N_SMPS
-    samples = dict(zip(["YRI", "CEU", "CHB"], samples_per_population))
 
     # Simulate tree sequence
     engine = stdpopsim.get_default_engine()
@@ -113,8 +108,15 @@ def main(config=None):
         n_heads = config["n_heads"]
         depth = config["depth"]
         n_snps = config["n_snps"]
-        use_padding = config["use_padding"]
+        n_smps = config["n_smps"]
+        stride = config["stride"]
+        pool = config["pool"]
         init_conv_dim = config["init_conv_dim"]
+
+        samples_per_population = [0, 0, 0]
+        # use a CEU population
+        samples_per_population[1] = n_smps
+        samples = dict(zip(["YRI", "CEU", "CHB"], samples_per_population))
 
         if use_vit:
 
@@ -144,7 +146,9 @@ def main(config=None):
                 num_classes=3,
                 width=n_snps,
                 batch_norm=batch_norm,
-                padding=math.floor(kernel_size / 2) if use_padding else 0,
+                padding=0,
+                stride=stride,
+                pool=pool,
             )
 
         model = model.to(DEVICE)
@@ -155,7 +159,10 @@ def main(config=None):
             lr=lr,
             weight_decay=0,
         )
-        scheduler = None
+        scheduler = None#torch.optim.lr_scheduler.LambdaLR(
+        #     optimizer,
+        #     lambda step: 1e-3 * ((0.9 * step) / 10_000),
+        # )
 
         loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -261,16 +268,18 @@ if __name__ == "__main__":
         "parameters": {
             "use_vit": {"values": [args.use_vit]},
             "n_snps": {"values": [36]},
+            "n_smps": {"values": [100]},
             "batch_size": {"values": [240]},
             "lr": {"values": [1e-3]},
-            "hidden_size": {"values": [48, 96, 192]},
-            "init_conv_dim": {"values": [32, 64]},
+            "hidden_size": {"values": [192]},
+            "init_conv_dim": {"values": [None] if args.use_vit else [32]},
             "n_hidden": {"values": [None] if args.use_vit else [2]},
             "n_heads": {"values": [6] if args.use_vit else [None]},
             "depth": {"values": [1, 2] if args.use_vit else [None]},
-            "batch_norm": {"values": [None] if args.use_vit else [False, True]},
+            "batch_norm": {"values": [None] if args.use_vit else [False]},
             "kernel_size": {"values": [None] if args.use_vit else [5]},
-            "use_padding": {"values": [None] if args.use_vit else [True, False]},
+            "stride": {"values": [None] if args.use_vit else [1, 2]},
+            "pool": {"values": [None] if args.use_vit else [False, True]},
         },
     }
 

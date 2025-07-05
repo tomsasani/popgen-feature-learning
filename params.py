@@ -21,7 +21,7 @@ class Parameter:
         self.min = min
         self.max = max
         self.name = name
-        self.proposal_width = (self.max - self.min) / 15
+        self.proposal_width = (self.max - self.min) / 1
 
     def initialize(self, rng: np.random.default_rng):
         return rng.uniform(self.min, self.max)
@@ -90,5 +90,8 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
     parameters = ParamSet()
+
+    for i in range(10):
+        print (parameters.N2.proposal(9_000, 1, rng))
 
     prop = parameters.N1.proposal(9_000, 1, rng)

@@ -35,21 +35,31 @@ def sort_min_diff_numpy(X):
     X_genotypes_sorted = X_genotypes[v[1][smallest]]
     X_sorted[0, :, :] = X_genotypes_sorted
     X_sorted[1, :, :] = X[1, :, :]
+    X_sorted[2, :, :] = X[2, :, :]
 
     return X_sorted
 
 
-def inter_snp_distances(positions: np.ndarray, norm_len: int) -> np.ndarray:
+def inter_snp_distances(
+    positions: np.ndarray,
+    norm_len: int,
+) -> np.ndarray:
+    # get max distance
     if positions.shape[0] > 0:
         dist_vec = [0]
         for i in range(positions.shape[0] - 1):
-            # NOTE: inter-snp distances always normalized to simulated region size
             dist_vec.append((positions[i + 1] - positions[i]) / norm_len)
     else:
         dist_vec = []
     dist_vec = np.array(dist_vec)
-
-    return np.array(dist_vec)
+    # normalize all to be 0-1
+    # if dist_vec.shape[0] != 0:
+    #     max_dist = np.max(dist_vec)
+    #     min_dist = np.min(dist_vec)
+    #     diff = max_dist - min_dist
+    #     dist_vec = dist_vec - min_dist
+    #     dist_vec = np.divide(dist_vec, diff)
+    return dist_vec
 
 
 def find_segregating_idxs(X: np.ndarray, filter_singletons: bool = False):
@@ -81,6 +91,7 @@ def check_for_missing_data(
     # count the number of haplotypes with 0 genotypes at each
     # site for all batches
     haps_with_zero = np.count_nonzero(batch[:, 0, :, :] == 0, axis=1)
+
     # figure out number of batches with 0-padded data
     batches_with_missing = np.any(haps_with_zero == H, axis=1)
     return np.sum(batches_with_missing)
@@ -89,6 +100,7 @@ def check_for_missing_data(
 def process_region(
     X: np.ndarray,
     positions: np.ndarray,
+    ref_alleles: np.ndarray,
     norm_len: int = global_vars.L,
     convert_to_rgb: bool = False,
     n_snps: int = 32,
@@ -110,15 +122,9 @@ def process_region(
     """
     # figure out how many sites and haplotypes are in the actual
     # multi-dimensional array
-    W, H = X.shape
-    # final_haps = n_haps // 2 if convert_to_diploid else n_haps
+    H, _ = X.shape
     # make sure we have exactly as many positions as there are sites
-    assert W == positions.shape[0]
-
-    # figure out the half-way point (measured in numbers of sites)
-    # in the input array
-    mid = W // 2
-    half_S = n_snps // 2
+    #assert W == positions.shape[0]
 
     H_final = H // 2 if convert_to_diploid else H
 
@@ -134,15 +140,16 @@ def process_region(
     # should we divide by the *actual* region length?
     distances = inter_snp_distances(positions, norm_len)
 
-    # first, transpose the full input matrix to be n_haps x n_snps
-    X = X.T
+    # figure out the half-way point (measured in numbers of sites)
+    # in the input array (after removing zero-dist sites)
+    _, W = X.shape 
+    mid = W // 2
+    half_S = n_snps // 2
 
     # if we have more than the necessary number of SNPs
     if mid >= half_S:
         # define indices to use for slicing
         i, j = mid - half_S, mid + half_S
-        # add sites to output
-        X = major_minor(X)
 
         # if the input data are phased haploids, we need to
         # create diploids
@@ -156,9 +163,11 @@ def process_region(
         # tile the inter-snp distances down the haplotypes
         # get inter-SNP distances, relative to the simualted region size
         distances_tiled = np.tile(distances[i:j], (H_final, 1))
+        ref_alleles_tiled = np.tile(ref_alleles[i:j], (H_final, 1))
 
         # add final channel of inter-snp distances
         region[1, :, :] = distances_tiled
+        region[2, :, :] = ref_alleles_tiled
 
 
     else:
@@ -166,7 +175,7 @@ def process_region(
         i, j = half_S - mid, mid + other_half_S
         # use the complete genotype array
         # but just add it to the center of the main array
-        X = major_minor(X)
+
         if convert_to_diploid:
             # convert -1s back to 0s
             X[X == -1] = 0
@@ -176,8 +185,10 @@ def process_region(
 
         # tile the inter-snp distances down the haplotypes
         distances_tiled = np.tile(distances, (H_final, 1))
+        ref_alleles_tiled = np.tile(ref_alleles, (H_final, 1))
         # add final channel of inter-snp distances
         region[1, :, i:j] = distances_tiled
+        region[2, :, i:j] = ref_alleles_tiled
 
     return region
 
@@ -195,9 +206,6 @@ def major_minor(matrix):
     # figure out where the derived sum is greater than half the haps
     switch_idxs = np.where(derived_total > (n_haps / 2))[0]
     matrix[:, switch_idxs] = 1 - matrix[:, switch_idxs]
-
-    # change 0s to -1s
-    matrix[matrix == 0] = -1
 
     return matrix
 

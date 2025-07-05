@@ -29,11 +29,9 @@ class ColumnTokenizer(torch.nn.Module):
         B, C, H, W = x.shape
         # permute to (B, H, C, W)
         x = x.permute(0, 2, 1, 3)
-        # print (x.shape)
         # then, flatten each "patch" of C * W such that
         # each patch is 1D and size (C * W).
         x = x.reshape(B, H, -1)
-        # print (x.shape)
         # embed "patches" of size (C * W, effectively a 1d
         # array equivalent to the number of SNPs)
         tokens = self.proj(x)
@@ -80,9 +78,7 @@ class SelfAttention(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * mlp_hidden_dim_ratio),
             nn.GELU(),
-            nn.Dropout(0.),
             nn.Linear(embed_dim * mlp_hidden_dim_ratio, embed_dim),
-            nn.Dropout(0.),
         )
 
     def forward(self, x):
@@ -171,6 +167,8 @@ class BasicPredictor(nn.Module):
         encoding_dim: int = 256,
         batch_norm: bool = False,
         padding: int = 0,
+        stride: int = 1,
+        pool: bool = False,
     ) -> None:
 
         super(BasicPredictor, self).__init__()
@@ -178,7 +176,7 @@ class BasicPredictor(nn.Module):
         self.agg = agg
         self.width = width
 
-        _stride = (1, 2)
+        _stride = (1, stride)
         _padding = (0, padding)
 
         out_W = width
@@ -195,11 +193,14 @@ class BasicPredictor(nn.Module):
                     padding=_padding,
                 ),
                 nn.ReLU(),
-                nn.MaxPool2d(
-                    kernel_size=(1, 2),
-                    stride=(1, 2),
-                ),
             ]
+            if pool:
+                block.append(
+                    nn.MaxPool2d(
+                        kernel_size=(1, 2),
+                        stride=(1, 2),
+                    ),
+                )
 
             out_W = (
                 math.floor((out_W - kernel[1] + (2 * (padding))) / _stride[1]) + 1
@@ -209,7 +210,8 @@ class BasicPredictor(nn.Module):
                 block.append(nn.BatchNorm2d(h_dim))
 
             # account for max pooling
-            out_W //= 2
+            if pool:
+                out_W //= 2
             in_channels = h_dim
             conv.extend(block)
 
@@ -228,7 +230,7 @@ class BasicPredictor(nn.Module):
         self.flatten = nn.Flatten()
 
     def forward(self, x):
-        x = self.encoder_conv(x)
+        x = self.conv(x)
         # take the average across haplotypes
         if self.agg == "mean":
             x = torch.mean(x, dim=2)
@@ -238,7 +240,7 @@ class BasicPredictor(nn.Module):
             pass
         # flatten, but ignore batch
         x = self.flatten(x)
-        encoded = self.encode(x)
+        encoded = self.fc(x)
         projection = self.project(encoded)
 
         return projection
@@ -248,18 +250,18 @@ if __name__ == "__main__":
 
     DEVICE = torch.device("cpu")
 
-
     model = BasicPredictor(
-        in_channels=1,
+        in_channels=2,
         kernel=(1, 5),
         hidden_dims=[32, 64],
         agg="mean",
         width=36,
         encoding_dim=128,
-        projection_dim=3,
-        pool=True,
+        num_classes=1,
         batch_norm=False,
         padding=0,
+        stride=2,
+        pool=False,
         
     )
     print (model)
@@ -267,6 +269,6 @@ if __name__ == "__main__":
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print (pytorch_total_params)
 
-    test = torch.rand(size=(100, 1, 200, 36)).to(DEVICE)
+    test = torch.rand(size=(100, 2, 200, 36)).to(DEVICE)
     proj = model(test)
     print (proj.shape)
