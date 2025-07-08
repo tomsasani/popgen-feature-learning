@@ -142,7 +142,7 @@ def process_region(
 
     # figure out the half-way point (measured in numbers of sites)
     # in the input array (after removing zero-dist sites)
-    _, W = X.shape 
+    _, W = X.shape
     mid = W // 2
     half_S = n_snps // 2
 

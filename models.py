@@ -137,9 +137,7 @@ class BabyTransformer(torch.nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        # print (x.shape)
         x = self.tokenizer(x)  # (B, H, hidden_size)
-        # print (x.shape)
         # pass through transformer encoder
         x = self.attention(x)
         # classification head on the average or attention-pooled
@@ -148,8 +146,8 @@ class BabyTransformer(torch.nn.Module):
         if self.attention_pool:
             cls_output = self.pooling(x)
         else:
-            cls_output = torch.mean(x, dim=1)
-        logits = self.classifier(cls_output)  
+            cls_output = torch.amax(x, dim=1)
+        logits = self.classifier(cls_output)
 
         return logits
 
@@ -206,9 +204,6 @@ class BasicPredictor(nn.Module):
                 math.floor((out_W - kernel[1] + (2 * (padding))) / _stride[1]) + 1
             )
 
-            if batch_norm:
-                block.append(nn.BatchNorm2d(h_dim))
-
             # account for max pooling
             if pool:
                 out_W //= 2
@@ -221,7 +216,6 @@ class BasicPredictor(nn.Module):
             nn.ReLU(),
             nn.Linear(encoding_dim, encoding_dim),
             nn.ReLU(),
-            
         )
         # two projection layers with batchnorm
         self.project = nn.Sequential(

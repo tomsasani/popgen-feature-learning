@@ -7,9 +7,11 @@ import math
 
 import global_vars
 
+
 def simulate_exp(
     params,
     sample_sizes,
+    recombination_map,
     rng: np.random.default_rng,
     seqlen: int = global_vars.L,
     plot: bool = False,
@@ -61,7 +63,7 @@ def simulate_exp(
         samples=sum(sample_sizes),
         demography=demography,
         sequence_length=seqlen,
-        recombination_rate=params.rho.value,
+        recombination_rate=recombination_map,
         discrete_genome=False,
         random_seed=seed,
         ploidy=2,
@@ -83,4 +85,12 @@ if __name__ == "__main__":
     params = params.ParamSet()
     rng = np.random.default_rng(42)
 
-    simulate_exp(params, [50], rng, plot=True, seqlen=50_000)
+    L = 25_000
+
+    rate_map = msprime.RateMap(
+        position=[0, (L - 2_000) // 2, (L + 2_000) // 2, L],
+        rate=[1e-8, 1e-8 * 10, 1e-8],
+    )
+    for _ in range(10):
+        ts = simulate_exp(params, [50], rate_map, rng, plot=True, seqlen=L)
+        print (ts.genotype_matrix().shape)
