@@ -6,6 +6,7 @@ import seaborn as sns
 import tqdm
 import stdpopsim
 import msprime
+import wandb
 
 import models
 from generator_fake import prep_simulated_region
@@ -71,25 +72,25 @@ def plot_example(
     plt.close()
 
 
-ITERATIONS = 1_000
-DEVICE = torch.device("mps")
+ITERATIONS = 500
+DEVICE = torch.device("cuda")
 
-CONFIG = {
-    "batch_size": 128,
-    "kernel_size": 5,
-    "conv_layers": 2,
-    "lr": 1e-3,
-    "batch_norm": False,
-    "hidden_size": 192,
-    "n_heads": 6,
-    "depth": 1,
-    "n_snps": 36,
-    "n_smps": 99,
-    "stride": 1,
-    "pool": True,
-    "agg": "max",
-    "init_conv_dim": 32,
-}
+# CONFIG = {
+#     "batch_size": 128,
+#     "kernel_size": 5,
+#     "conv_layers": 2,
+#     "lr": 1e-3,
+#     "batch_norm": False,
+#     "hidden_size": 192,
+#     "n_heads": 6,
+#     "depth": 1,
+#     "n_snps": 36,
+#     "n_smps": 99,
+#     "stride": 1,
+#     "pool": True,
+#     "agg": "max",
+#     "init_conv_dim": 32,
+# }
 
 
 def decay(step: int):
@@ -105,7 +106,7 @@ def warmup_plus_decay(step: int):
         return 0.9 ** (step / rest_steps)
 
 
-def main(args):
+def main(config=None):
 
     # Choose species and model
     species = stdpopsim.get_species("HomSap")
@@ -124,210 +125,221 @@ def main(args):
     engine = stdpopsim.get_default_engine()
     parameters = params.ParamSet()
 
-    batch_size = CONFIG["batch_size"]
-    kernel_size = CONFIG["kernel_size"]
-    conv_layers = CONFIG["conv_layers"]
-    use_vit = args.use_vit
-    lr = CONFIG["lr"]
-    batch_norm = CONFIG["batch_norm"]
-    hidden_size = CONFIG["hidden_size"]
-    n_heads = CONFIG["n_heads"]
-    depth = CONFIG["depth"]
-    n_snps = CONFIG["n_snps"]
-    n_smps = CONFIG["n_smps"]
-    stride = CONFIG["stride"]
-    pool = CONFIG["pool"]
-    agg = CONFIG["agg"]
-    init_conv_dim = CONFIG["init_conv_dim"]
+    # start a new wandb run to track this script
+    with wandb.init(project="simclr-popgen", config=config):
 
-    samples_per_population = [0, 0, 0]
-    # use a CEU population
-    samples_per_population[1] = n_smps
-    samples = dict(
-        zip(
-            ["YRI", "CEU", "CHB"],
-            samples_per_population,
+        config = wandb.config
+
+        batch_size = config["batch_size"]
+        kernel_size = config["kernel_size"]
+        conv_layers = config["conv_layers"]
+        use_vit = config["use_vit"]
+        lr = config["lr"]
+        batch_norm = config["batch_norm"]
+        hidden_size = config["hidden_size"]
+        n_heads = config["n_heads"]
+        depth = config["depth"]
+        n_snps = config["n_snps"]
+        n_smps = config["n_smps"]
+        stride = config["stride"]
+        pool = config["pool"]
+        agg = config["agg"]
+        init_conv_dim = config["init_conv_dim"]
+        tokenizer = config["tokenizer"]
+        include_dists = config["include_dists"]
+
+
+        if use_vit:
+            model = models.BabyTransformer(
+                width=n_snps,
+                in_channels=2 if include_dists else 1,
+                num_classes=2,
+                hidden_size=hidden_size,
+                num_heads=n_heads,
+                depth=depth,
+                mlp_ratio=2,
+                agg=agg,
+                tokenizer=tokenizer,
+            )
+
+        else:
+            hidden_dims = []
+            for _ in range(conv_layers):
+                hidden_dims.append(init_conv_dim)
+                init_conv_dim *= 2
+
+            model = models.BasicPredictor(
+                in_channels=2 if include_dists else 1,
+                kernel=(1, kernel_size),
+                hidden_dims=hidden_dims,
+                agg=agg,
+                encoding_dim=hidden_size,
+                num_classes=2,
+                width=n_snps,
+                batch_norm=batch_norm,
+                padding=0,
+                stride=stride,
+                pool=pool,
+            )
+
+        model = model.to(DEVICE)
+        pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=lr,
         )
-    )
 
-    if use_vit:
+        scheduler = None
+        if use_vit:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, decay)
+        else:
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, decay)
 
-        model = models.BabyTransformer(
-            width=n_snps,
-            in_channels=2,
-            num_classes=2,
-            hidden_size=hidden_size,
-            num_heads=n_heads,
-            depth=depth,
-            attention_pool=False,
-            mlp_ratio=2,
-        )
+        rng = np.random.default_rng(42)
 
-    else:
-        hidden_dims = []
-        for _ in range(conv_layers):
-            hidden_dims.append(init_conv_dim)
-            init_conv_dim *= 2
+        loss_fn = torch.nn.CrossEntropyLoss()
 
-        model = models.BasicPredictor(
-            in_channels=2,
-            kernel=(1, kernel_size),
-            hidden_dims=hidden_dims,
-            agg="max",
-            encoding_dim=hidden_size,
-            num_classes=2,
-            width=n_snps,
-            batch_norm=batch_norm,
-            padding=0,
-            stride=stride,
-            pool=pool,
-        )
+        res = []
+        for iteration in tqdm.tqdm(range(ITERATIONS)):
 
-    model = model.to(DEVICE)
-    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            batch_x, batch_y = [], []
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        weight_decay=0,
-    )
+            # create a batch
+            counted = 0
+            while counted < batch_size:
+                # pick random demo
+                ci = rng.choice(2)
 
-    scheduler = None
-    if use_vit:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_plus_decay)
-    else:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, decay)
+                background = rng.uniform(1e-8, 1.5e-8)
+                heat = 1 if ci == 0 else rng.uniform(10, 100)
 
-    rng = np.random.default_rng(42)
+                hs_s, hs_e = (
+                    (global_vars.L - global_vars.HOTSPOT_L) / 2,
+                    (global_vars.L + global_vars.HOTSPOT_L) / 2,
+                )
+                rho_map = msprime.RateMap(
+                    position=[
+                        0,
+                        hs_s,
+                        hs_e,
+                        global_vars.L,
+                    ],
+                    rate=[background, background * heat, background],
+                )
 
-    loss_fn = torch.nn.CrossEntropyLoss()
+                ts = demographies.simulate_exp(
+                    parameters,
+                    [n_smps],
+                    rho_map,
+                    rng,
+                    seqlen=global_vars.L,
+                    plot=False,
+                )
 
-    res = []
-    for iteration in tqdm.tqdm(range(ITERATIONS)):
+                # ts = msprime.simulate(
+                #     sample_size=n_smps * 2,
+                #     Ne=1e4,
+                #     recombination_map=rho_map,
+                #     mutation_rate=1.1e-8,
+                # )
 
-        batch_x, batch_y = [], []
+                # samples_per_population = [0, 0, 0]
+                # # use a CEU population
+                # samples_per_population[1] = n_smps
+                # samples = dict(
+                #     zip(
+                #         ["YRI", "CEU", "CHB"],
+                #         samples_per_population,
+                #     )
+                # )
 
-        # create a batch
-        counted = 0
-        while counted < batch_size:
-            # pick random demo
-            ci = rng.choice(2)
+                # ts = engine.simulate(
+                #     demography,
+                #     contig=contigs[ci],
+                #     samples=samples,
+                # )
 
-            background = rng.uniform(5e-9, 2e-8)
-            heat = 1 if ci == 0 else rng.uniform(10, 100)
+                X, positions = prep_simulated_region(
+                    ts,
+                    filter_singletons=False,
+                )
 
-            hs_s, hs_e = (
-                (global_vars.L - global_vars.HOTSPOT_L) / 2,
-                (global_vars.L + global_vars.HOTSPOT_L) / 2,
-            )
-            rho_map = msprime.RateMap(
-                position=[
-                    0,
-                    hs_s,
-                    hs_e,
-                    global_vars.L,
-                ],
-                rate=[background, background * heat, background],
-            )
+                # figure out if we have enough SNPs on either side of the hotspot
+                if ci == 1:
+                    hs_idxs = np.where((positions >= hs_s) & (positions <= hs_e))
+                    # need at least 1 SNPs with hotspot
+                    if hs_idxs[0].shape[0] < 1:
+                        continue
 
-            ts = demographies.simulate_exp(
-                parameters,
-                [n_smps],
-                rho_map,
-                rng,
-                seqlen=global_vars.L,
-                plot=False,
-            )
+                X = util.major_minor(X.T)
 
-            # ts = msprime.simulate(
-            #     sample_size=n_smps * 2,
-            #     Ne=1e4,
-            #     recombination_map=rho_map,
-            #     mutation_rate=1.1e-8,
-            # )
+                ref_alleles = np.zeros(X.shape[1])
+                region = util.process_region(
+                    X,
+                    positions,
+                    ref_alleles,
+                    convert_to_rgb=True,
+                    n_snps=n_snps,
+                    norm_len=global_vars.L,
+                    convert_to_diploid=False,
+                )
 
-            # ts = engine.simulate(
-            #     demography,
-            #     contig=contigs[ci],
-            #     samples=samples,
-            # )
-
-            X, positions = prep_simulated_region(
-                ts,
-                filter_singletons=False,
-            )
-
-            # figure out if we have enough SNPs on either side of the hotspot
-            if ci == 1:
-                hs_idxs = np.where((positions >= hs_s) & (positions <= hs_e))
-                # need at least 5 SNPs with hotspot
-                if hs_idxs[0].shape[0] < 1:
-                    # print (hs_s, hs_e)
-                    # print (positions)
+                n_batches_zero_padded = util.check_for_missing_data(
+                    np.expand_dims(region, axis=0)
+                )
+                if n_batches_zero_padded > 0:
                     continue
+                if include_dists:
+                    batch_x.append(np.expand_dims(region[:2, :, :], axis=0))
+                else:
+                    batch_x.append(np.expand_dims(region[0, :, :], axis=(0, 1)))
 
-            X = util.major_minor(X.T)
+                batch_y.append(ci)
+                counted += 1
 
-            ref_alleles = np.zeros(X.shape[1])
-            region = util.process_region(
-                X,
-                positions,
-                ref_alleles,
-                convert_to_rgb=True,
-                n_snps=n_snps,
-                norm_len=global_vars.L,
-                convert_to_diploid=False,
+            batch_x = np.concatenate(batch_x)
+            batch_y = np.array(batch_y)
+
+            batch_x = torch.from_numpy(batch_x)
+            batch_y = torch.from_numpy(batch_y)
+
+            train_loss, train_acc = train_loop(
+                model,
+                batch_x,
+                batch_y,
+                loss_fn,
+                optimizer,
+                scheduler,
             )
 
-            n_batches_zero_padded = util.check_for_missing_data(
-                np.expand_dims(region, axis=0)
-            )
-            if n_batches_zero_padded > 0:
-                continue
-            # batch_x.append(np.expand_dims(region[0, :, :], axis=0))
-            batch_x.append(np.expand_dims(region[:2, :, :], axis=0))
-            batch_y.append(ci)
-            counted += 1
+            # if iteration == 0:
+            #     plot_example(
+            #         batch_x, batch_y,
+            #         plot_name="fig/reconstructions/0.png",
+            #     )
+            # if iteration % 10 == 0:
+            #     print (f"on iteration {iteration}, loss = {train_loss} and acc = {train_acc}")
+            classes, counts = np.unique(batch_y, return_counts=True)
+            d = {
+                    "iteration": iteration,
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "n_params": pytorch_total_params,
+                    "class_imbalance": np.min(counts) / batch_size,
+                }
+            if iteration % 5 == 0:
+                wandb.log(d)
+            d.update(config)
+            res.append(d)
+        res = pd.DataFrame(res)
 
-        batch_x = np.concatenate(batch_x)
-        batch_y = np.array(batch_y)
+        res.to_csv(f"csv/{wandb.run.name}.tsv", sep="\t", index=False)
 
-        batch_x = torch.from_numpy(batch_x)# .unsqueeze(dim=1)
-        batch_y = torch.from_numpy(batch_y)
-
-        train_loss, train_acc = train_loop(
-            model,
-            batch_x,
-            batch_y,
-            loss_fn,
-            optimizer,
-            scheduler,
-        )
-
-        if iteration == 0:
-            plot_example(
-                batch_x, batch_y,
-                plot_name="fig/reconstructions/0.png",
-            )
-        if iteration % 10 == 0:
-            print (f"on iteration {iteration}, loss = {train_loss} and acc = {train_acc}")
-
-        d = {
-                "iteration": iteration,
-                "train_loss": train_loss,
-                "train_acc": train_acc,
-                "n_params": pytorch_total_params,
-            }
-
-        res.append(d)
-    res = pd.DataFrame(res)
-
-    res.to_csv(f"csv/o.{args.use_vit}.tsv", sep="\t", index=False)
-
-    f, ax = plt.subplots()
-    sns.scatterplot(data=res, x="iteration", y="train_acc", ax=ax)
-    f.tight_layout()
-    f.savefig(f"fig/{args.use_vit}.png")
+        # f, ax = plt.subplots()
+        # sns.scatterplot(data=res, x="iteration", y="train_acc", ax=ax)
+        # f.tight_layout()
+        # f.savefig(f"fig/{args.use_vit}.png")
 
 if __name__ == "__main__":
 
@@ -337,4 +349,33 @@ if __name__ == "__main__":
     p.add_argument("-use_vit", action="store_true")
     args = p.parse_args()
 
-    main(args)
+    # main(args)
+
+    sweep_configuration = {
+        "method": "grid",
+        "name": "sweep",
+        "metric": {"goal": "maximize", "name": "salient_silhouette"},
+        "parameters": {
+            "batch_size": {"values": [256]},
+            "kernel_size": {"values": [5]},
+            "conv_layers": {"values": [2]},
+            "tokenizer": {"values": ["mlp"] if args.use_vit else [None]},
+            "agg": {"values": ["max"] if args.use_vit else ["max"]},
+            "use_vit": {"values": [args.use_vit]},
+            "lr": {"values": [1e-3]},
+            "batch_norm": {"values": [False]},
+            "hidden_size": {"values": [192]},
+            "n_heads": {"values": [6] if args.use_vit else [None]},
+            "depth": {"values": [1] if args.use_vit else [None]},
+            "n_snps": {"values": [36]},
+            "n_smps": {"values": [100]},
+            "stride": {"values": [None] if args.use_vit else [1]},
+            "pool": {"values": [None] if args.use_vit else [True]},
+            "init_conv_dim": {"values": [32]},
+            "include_dists": {"values": [False]},
+        },
+    }
+
+    sweep_id = wandb.sweep(sweep=sweep_configuration, project="simclr-popgen")
+
+    wandb.agent(sweep_id, function=main)

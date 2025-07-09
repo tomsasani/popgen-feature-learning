@@ -37,6 +37,57 @@ class ColumnTokenizer(torch.nn.Module):
         tokens = self.proj(x)
         return tokens
 
+class HaplotypeTokenizer(torch.nn.Module):
+
+    def __init__(
+        self,
+        input_channels: int = 1,
+        input_width: int = 32,
+        hidden_size: int = 192,
+    ):
+        super().__init__()
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(
+                input_channels,
+                32,
+                kernel_size=(1, 5),
+                stride=(1, 1),
+                padding=(0, 2),
+            ),
+            nn.ReLU(),
+            # nn.Conv2d(
+            #     32,
+            #     64,
+            #     kernel_size=(1, 5),
+            #     stride=(1, 1),
+            #     padding=(0, 2),
+            # ),
+            # nn.ReLU(),
+        )
+        # simple linear projection
+        self.proj = torch.nn.Linear(input_width, hidden_size)
+
+    def forward(self, x):
+        # shape should be (B, C, H, W) where H is the number
+        # of haplotypes and W is the number of SNPs
+        B, C, H, W = x.shape
+        # apply convolution to create feature maps
+        x = self.cnn(x)
+        # agg across feature maps
+        # residual?
+        x = torch.amax(x, dim=1).unsqueeze(dim=1)
+        # permute to (B, H, C, W)
+        x = x.permute(0, 2, 1, 3)
+        # then, flatten each "patch" of C * W such that
+        # each patch is 1D and size (C * W).
+        x = x.reshape(B, H, -1)
+        # embed "patches" of size (C * W, effectively a 1d
+        # array equivalent to the number of SNPs)
+        tokens = self.proj(x)
+
+        return tokens
+
 
 class AttentionPooling(nn.Module):
     def __init__(self, hidden_dim):
@@ -98,25 +149,33 @@ class BabyTransformer(torch.nn.Module):
         num_heads: int = 1,
         hidden_size: int = 128,
         num_classes: int = 2,
-        attention_pool: bool = False,
         depth: int = 4,
         mlp_ratio: int = 2,
+        agg: str = "max",
+        tokenizer: str = "mlp",
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
         self.pooling = AttentionPooling(hidden_size)
-        self.attention_pool = attention_pool
         self.norm = nn.LayerNorm(hidden_size)
+        self.agg = agg
 
         # we use a "custom" tokenizer that takes
         # patches of size (C * W), where W is the
         # number of SNPs
-        self.tokenizer = ColumnTokenizer(
-            input_channels=in_channels,
-            input_width=width,
-            hidden_size=hidden_size,
-        )
+        if tokenizer == "mlp":
+            self.tokenizer = ColumnTokenizer(
+                input_channels=in_channels,
+                input_width=width,
+                hidden_size=hidden_size,
+            )
+        else:
+            self.tokenizer = HaplotypeTokenizer(
+                input_channels=in_channels,
+                input_width=width,
+                hidden_size=hidden_size,
+            )
 
         self.attention = nn.Sequential(
             *[
@@ -143,10 +202,12 @@ class BabyTransformer(torch.nn.Module):
         # classification head on the average or attention-pooled
         # final embeddings (no CLS token)
         x = self.norm(x)
-        if self.attention_pool:
+        if self.agg == "attention":
             cls_output = self.pooling(x)
-        else:
+        elif self.agg == "max":
             cls_output = torch.amax(x, dim=1)
+        elif self.agg == "mean":
+            cls_output = torch.mean(x, dim=1)
         logits = self.classifier(cls_output)
 
         return logits
@@ -257,6 +318,12 @@ if __name__ == "__main__":
         stride=2,
         pool=False,
         
+    )
+
+    model = HaplotypeTokenizer(
+        input_channels=2,
+        input_width=36,
+        hidden_size=192
     )
     print (model)
     model = model.to(DEVICE)
