@@ -72,7 +72,7 @@ def plot_example(
     plt.close()
 
 
-ITERATIONS = 500
+ITERATIONS = 1_000
 DEVICE = torch.device("cuda")
 
 # CONFIG = {
@@ -153,7 +153,7 @@ def main(config=None):
             model = models.BabyTransformer(
                 width=n_snps,
                 in_channels=2 if include_dists else 1,
-                num_classes=2,
+                num_classes=3,
                 hidden_size=hidden_size,
                 num_heads=n_heads,
                 depth=depth,
@@ -161,7 +161,6 @@ def main(config=None):
                 agg=agg,
                 tokenizer=tokenizer,
             )
-
         else:
             hidden_dims = []
             for _ in range(conv_layers):
@@ -174,7 +173,7 @@ def main(config=None):
                 hidden_dims=hidden_dims,
                 agg=agg,
                 encoding_dim=hidden_size,
-                num_classes=2,
+                num_classes=3,
                 width=n_snps,
                 batch_norm=batch_norm,
                 padding=0,
@@ -196,7 +195,7 @@ def main(config=None):
         else:
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, decay)
 
-        rng = np.random.default_rng(42)
+        rng = np.random.default_rng(421)
 
         loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -209,56 +208,58 @@ def main(config=None):
             counted = 0
             while counted < batch_size:
                 # pick random demo
-                ci = rng.choice(2)
+                ci = rng.choice(3)
 
-                background = rng.uniform(1e-8, 1.5e-8)
-                heat = 1 if ci == 0 else rng.uniform(10, 100)
+                # background = rng.uniform(1e-8, 1.5e-8)
+                # heat = 1 if ci == 0 else rng.uniform(10, 100)
 
-                hs_s, hs_e = (
-                    (global_vars.L - global_vars.HOTSPOT_L) / 2,
-                    (global_vars.L + global_vars.HOTSPOT_L) / 2,
-                )
-                rho_map = msprime.RateMap(
-                    position=[
-                        0,
-                        hs_s,
-                        hs_e,
-                        global_vars.L,
-                    ],
-                    rate=[background, background * heat, background],
-                )
+                # hs_s, hs_e = (
+                #     (global_vars.L - global_vars.HOTSPOT_L) / 2,
+                #     (global_vars.L + global_vars.HOTSPOT_L) / 2,
+                # )
+                # rho_map = msprime.RateMap(
+                #     position=[
+                #         0,
+                #         hs_s,
+                #         hs_e,
+                #         global_vars.L,
+                #     ],
+                #     rate=[background, background * heat, background],
+                # )
 
-                ts = demographies.simulate_exp(
-                    parameters,
-                    [n_smps],
-                    rho_map,
-                    rng,
-                    seqlen=global_vars.L,
-                    plot=False,
-                )
+                # ts = demographies.simulate_exp(
+                #     parameters,
+                #     [n_smps],
+                #     rho_map,
+                #     rng,
+                #     seqlen=global_vars.L,
+                #     plot=False,
+                # )
 
+                # seed = rng.integers(0, 2**32)
                 # ts = msprime.simulate(
                 #     sample_size=n_smps * 2,
                 #     Ne=1e4,
                 #     recombination_map=rho_map,
                 #     mutation_rate=1.1e-8,
+                #     random_seed=seed,
                 # )
 
-                # samples_per_population = [0, 0, 0]
-                # # use a CEU population
-                # samples_per_population[1] = n_smps
-                # samples = dict(
-                #     zip(
-                #         ["YRI", "CEU", "CHB"],
-                #         samples_per_population,
-                #     )
-                # )
+                samples_per_population = [0, 0, 0]
+                # use a CEU population
+                samples_per_population[1] = n_smps
+                samples = dict(
+                    zip(
+                        ["YRI", "CEU", "CHB"],
+                        samples_per_population,
+                    )
+                )
 
-                # ts = engine.simulate(
-                #     demography,
-                #     contig=contigs[ci],
-                #     samples=samples,
-                # )
+                ts = engine.simulate(
+                    demography,
+                    contig=contigs[ci],
+                    samples=samples,
+                )
 
                 X, positions = prep_simulated_region(
                     ts,
@@ -266,11 +267,11 @@ def main(config=None):
                 )
 
                 # figure out if we have enough SNPs on either side of the hotspot
-                if ci == 1:
-                    hs_idxs = np.where((positions >= hs_s) & (positions <= hs_e))
-                    # need at least 1 SNPs with hotspot
-                    if hs_idxs[0].shape[0] < 1:
-                        continue
+                # if ci == 1:
+                #     hs_idxs = np.where((positions >= hs_s) & (positions <= hs_e))
+                #     # need at least 1 SNPs with hotspot
+                #     if hs_idxs[0].shape[0] < 1:
+                #         continue
 
                 X = util.major_minor(X.T)
 
@@ -313,13 +314,6 @@ def main(config=None):
                 scheduler,
             )
 
-            # if iteration == 0:
-            #     plot_example(
-            #         batch_x, batch_y,
-            #         plot_name="fig/reconstructions/0.png",
-            #     )
-            # if iteration % 10 == 0:
-            #     print (f"on iteration {iteration}, loss = {train_loss} and acc = {train_acc}")
             classes, counts = np.unique(batch_y, return_counts=True)
             d = {
                     "iteration": iteration,
@@ -332,14 +326,11 @@ def main(config=None):
                 wandb.log(d)
             d.update(config)
             res.append(d)
+
         res = pd.DataFrame(res)
 
         res.to_csv(f"csv/{wandb.run.name}.tsv", sep="\t", index=False)
 
-        # f, ax = plt.subplots()
-        # sns.scatterplot(data=res, x="iteration", y="train_acc", ax=ax)
-        # f.tight_layout()
-        # f.savefig(f"fig/{args.use_vit}.png")
 
 if __name__ == "__main__":
 
@@ -364,13 +355,13 @@ if __name__ == "__main__":
             "use_vit": {"values": [args.use_vit]},
             "lr": {"values": [1e-3]},
             "batch_norm": {"values": [False]},
-            "hidden_size": {"values": [192]},
-            "n_heads": {"values": [6] if args.use_vit else [None]},
+            "hidden_size": {"values": [128]},
+            "n_heads": {"values": [8] if args.use_vit else [None]},
             "depth": {"values": [1] if args.use_vit else [None]},
             "n_snps": {"values": [36]},
             "n_smps": {"values": [100]},
             "stride": {"values": [None] if args.use_vit else [1]},
-            "pool": {"values": [None] if args.use_vit else [True]},
+            "pool": {"values": [None] if args.use_vit else [True, False]},
             "init_conv_dim": {"values": [32]},
             "include_dists": {"values": [False]},
         },
