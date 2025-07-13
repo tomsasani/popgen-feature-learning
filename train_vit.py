@@ -11,8 +11,6 @@ import wandb
 import models
 from generator_fake import prep_simulated_region
 import util
-import demographies
-import params
 import global_vars
 
 def train_loop(
@@ -73,7 +71,7 @@ def plot_example(
 
 
 ITERATIONS = 1_000
-DEVICE = torch.device("cuda")
+DEVICE = torch.device("mps")
 
 # CONFIG = {
 #     "batch_size": 128,
@@ -123,7 +121,6 @@ def main(config=None):
     ]
 
     engine = stdpopsim.get_default_engine()
-    parameters = params.ParamSet()
 
     # start a new wandb run to track this script
     with wandb.init(project="simclr-popgen", config=config):
@@ -148,12 +145,11 @@ def main(config=None):
         tokenizer = config["tokenizer"]
         include_dists = config["include_dists"]
 
-
         if use_vit:
             model = models.BabyTransformer(
                 width=n_snps,
                 in_channels=2 if include_dists else 1,
-                num_classes=3,
+                num_classes=2,
                 hidden_size=hidden_size,
                 num_heads=n_heads,
                 depth=depth,
@@ -173,7 +169,7 @@ def main(config=None):
                 hidden_dims=hidden_dims,
                 agg=agg,
                 encoding_dim=hidden_size,
-                num_classes=3,
+                num_classes=2,
                 width=n_snps,
                 batch_norm=batch_norm,
                 padding=0,
@@ -208,70 +204,54 @@ def main(config=None):
             counted = 0
             while counted < batch_size:
                 # pick random demo
-                ci = rng.choice(3)
+                ci = rng.choice(2)
 
-                # background = rng.uniform(1e-8, 1.5e-8)
-                # heat = 1 if ci == 0 else rng.uniform(10, 100)
+                background = rng.uniform(1e-8, 1.5e-8)
+                heat = 1 if ci == 0 else rng.uniform(10, 100)
 
-                # hs_s, hs_e = (
-                #     (global_vars.L - global_vars.HOTSPOT_L) / 2,
-                #     (global_vars.L + global_vars.HOTSPOT_L) / 2,
-                # )
-                # rho_map = msprime.RateMap(
-                #     position=[
-                #         0,
-                #         hs_s,
-                #         hs_e,
-                #         global_vars.L,
-                #     ],
-                #     rate=[background, background * heat, background],
-                # )
-
-                # ts = demographies.simulate_exp(
-                #     parameters,
-                #     [n_smps],
-                #     rho_map,
-                #     rng,
-                #     seqlen=global_vars.L,
-                #     plot=False,
-                # )
-
-                # seed = rng.integers(0, 2**32)
-                # ts = msprime.simulate(
-                #     sample_size=n_smps * 2,
-                #     Ne=1e4,
-                #     recombination_map=rho_map,
-                #     mutation_rate=1.1e-8,
-                #     random_seed=seed,
-                # )
-
-                samples_per_population = [0, 0, 0]
-                # use a CEU population
-                samples_per_population[1] = n_smps
-                samples = dict(
-                    zip(
-                        ["YRI", "CEU", "CHB"],
-                        samples_per_population,
-                    )
+                hs_s, hs_e = (
+                    (global_vars.L - global_vars.HOTSPOT_L) / 2,
+                    (global_vars.L + global_vars.HOTSPOT_L) / 2,
+                )
+                rho_map = msprime.RateMap(
+                    position=[
+                        0,
+                        hs_s,
+                        hs_e,
+                        global_vars.L,
+                    ],
+                    rate=[background, background * heat, background],
                 )
 
-                ts = engine.simulate(
-                    demography,
-                    contig=contigs[ci],
-                    samples=samples,
+                seed = rng.integers(0, 2**32)
+                ts = msprime.simulate(
+                    sample_size=n_smps * 2,
+                    Ne=1e4,
+                    recombination_map=rho_map,
+                    mutation_rate=1.1e-8,
+                    random_seed=seed,
                 )
+
+                # samples_per_population = [0, 0, 0]
+                # # use a CEU population
+                # samples_per_population[1] = n_smps
+                # samples = dict(
+                #     zip(
+                #         ["YRI", "CEU", "CHB"],
+                #         samples_per_population,
+                #     )
+                # )
+
+                # ts = engine.simulate(
+                #     demography,
+                #     contig=contigs[ci],
+                #     samples=samples,
+                # )
 
                 X, positions = prep_simulated_region(
                     ts,
                     filter_singletons=False,
                 )
-
-                # figure out if we have enough SNPs on either side of the hotspot
-                # if ci == 1:
-                #     hs_idxs = np.where((positions >= hs_s) & (positions <= hs_e))
-                #     # need at least 1 SNPs with hotspot
-                #     if hs_idxs[0].shape[0] < 1:
-                #         continue
 
                 X = util.major_minor(X.T)
 
@@ -314,7 +294,7 @@ def main(config=None):
                 scheduler,
             )
 
-            classes, counts = np.unique(batch_y, return_counts=True)
+            _, counts = np.unique(batch_y, return_counts=True)
             d = {
                     "iteration": iteration,
                     "train_loss": train_loss,
@@ -340,8 +320,6 @@ if __name__ == "__main__":
     p.add_argument("-use_vit", action="store_true")
     args = p.parse_args()
 
-    # main(args)
-
     sweep_configuration = {
         "method": "grid",
         "name": "sweep",
@@ -354,14 +332,14 @@ if __name__ == "__main__":
             "agg": {"values": ["max"] if args.use_vit else ["max"]},
             "use_vit": {"values": [args.use_vit]},
             "lr": {"values": [1e-3]},
-            "batch_norm": {"values": [False]},
+            "batch_norm": {"values": [None] if args.use_vit else [True]},
             "hidden_size": {"values": [128]},
             "n_heads": {"values": [8] if args.use_vit else [None]},
             "depth": {"values": [1] if args.use_vit else [None]},
             "n_snps": {"values": [36]},
             "n_smps": {"values": [100]},
             "stride": {"values": [None] if args.use_vit else [1]},
-            "pool": {"values": [None] if args.use_vit else [True, False]},
+            "pool": {"values": [None] if args.use_vit else [True]},
             "init_conv_dim": {"values": [32]},
             "include_dists": {"values": [False]},
         },

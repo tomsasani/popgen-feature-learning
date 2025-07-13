@@ -135,7 +135,7 @@ class SelfAttention(nn.Module):
     def forward(self, x):
         # x shape: (batch_size, seq_len, embed_dim)
         x_norm = self.norm(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm)  # Self-attention: Q = K = V = x
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)  
         x = x + attn_out
         x_norm = self.norm(x)
         return x + self.mlp(x_norm)
@@ -212,6 +212,7 @@ class BabyTransformer(torch.nn.Module):
 
         return logits
 
+
 class BasicPredictor(nn.Module):
 
     def __init__(
@@ -260,6 +261,8 @@ class BasicPredictor(nn.Module):
                         stride=(1, 2),
                     ),
                 )
+            if batch_norm:
+                block.append(nn.BatchNorm2d(h_dim))
 
             out_W = (
                 math.floor((out_W - kernel[1] + (2 * (padding))) / _stride[1]) + 1
