@@ -8,7 +8,7 @@ DEVICE = torch.device("cuda")
 
 def off_diagonal(x):
     # return a flattened view of the off-diagonal elements of a square matrix
-    n, m = x.shape
+    b, n, m = x.shape
     assert n == m
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
@@ -39,28 +39,123 @@ class BarlowTwinsLoss(nn.Module):
 
         return loss
 
-class SpectrumLoss(nn.Module):
-    def __init__(self, freq):
-        super(SpectrumLoss, self).__init__()
-        self.freq = freq
 
-    def forward(self, preds, true):
-        # weight the loss by inverse of class frequency
-        # convert true mutations to one hot encodings
-        # preds = preds.permute(0, 2, 1)
-        weights = 1 / self.freq
-        # if self.per_batch:
-        #     _true = torch.flatten(true)
-        #     u, c = torch.unique(_true, return_counts=True)
-        #     weights = c / torch.sum(c)
-        #     weights = 1 / weights
-        # weights = weights / torch.sum(weights)
-        loss = nn.CrossEntropyLoss(reduction="mean")#, weight=weights.to(DEVICE))
-        # loss = nn.BCEWithLogitsLoss(reduction="mean", weight=weights.to(DEVICE))
-        l = loss(preds, true.to(DEVICE))
-        
-        return l
-        
+def total_covariance_loss(batch):
+    """get the sum of covariance losses for each
+    unique view within the batch
+
+    Args:
+        batch (_type_): _description_
+    """
+    B, V, D = batch.shape
+    covariance_loss = 0
+    for vi in torch.arange(V):
+        v_batch = batch[:, vi, :]
+        # Covariance
+        v_centered = v_batch - v_batch.mean(dim=0, keepdim=True)
+        cov = (v_centered.T @ v_centered) / (B - 1)
+        off_diag = cov - torch.diag(torch.diag(cov))
+        covariance_loss += (off_diag ** 2).sum() / D
+    return covariance_loss
+
+def total_invariance_loss(batch):
+    """for each pair of views, get the MSE loss between
+    their batch embedding vectors
+
+    Args:
+        batch (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    invariance_loss = 0
+    B, V, D = batch.shape
+    for vi in torch.arange(V):
+        for vj in torch.arange(V):
+            if vi == vj: continue
+            vi_batch = batch[:, vi, :]
+            vj_batch = batch[:, vj, :]
+            # invariance
+            invariance = F.mse_loss(vi_batch, vj_batch)
+            invariance_loss += invariance# / B
+    return invariance_loss
+
+def total_variance_regularization(batch, eps=1e-4):
+    """_summary_
+
+    Args:
+        batch (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    total_variance_reg = 0
+    # get regularized standard deviation
+    B, V, D = batch.shape
+    for vi in torch.arange(V):
+        v_batch = batch[:, vi, :]
+        std = torch.sqrt(v_batch.var(dim=0) + eps)
+        variance_reg = torch.mean(F.relu(1.0 - std))
+        total_variance_reg += variance_reg
+
+    return total_variance_reg
+
+class SpectrumVICReg(nn.Module):
+    def __init__(self):
+        super(SpectrumVICReg, self).__init__()
+
+    def forward(
+        self,
+        z,
+        sim_coeff=25.0,
+        std_coeff=25.0,
+        cov_coeff=1.0,
+    ):
+        """
+        VICReg loss for N views per sample.
+
+        Args:
+            z: Tensor of shape (B, N, D), embeddings of N views for each sample.
+            sim_coeff: weight for invariance (similarity) loss
+            std_coeff: weight for variance loss
+            cov_coeff: weight for covariance loss
+            eps: numerical stability
+
+        Returns:
+            Scalar VICReg loss
+        """
+        B, N, D = z.shape
+
+        invariance_loss = total_invariance_loss(z)
+        variance_regularization = total_variance_regularization(z)
+        covariance_loss = total_covariance_loss(z)
+
+        loss = (
+            sim_coeff * invariance_loss
+            + std_coeff * variance_regularization
+            + cov_coeff * covariance_loss
+        )
+        return loss
+
+
+class SpectrumViewLoss(nn.Module):
+    def __init__(self, lmbda: float = 0.0051):
+        super(SpectrumViewLoss, self).__init__()
+        self.lmbda = lmbda
+
+    def forward(self, z, keep_batch: bool = False):
+        # z is a tensor of shape (B, V, D), where B is the batch size
+        # V is the number of views (6) and D is the dimensionality
+        B, V, D = z.shape
+        # compute the average embedding across views
+        mean_per_batch = z.mean(dim=1).unsqueeze(dim=1)
+        # compute distance to centroid
+        dist = F.mse_loss(z, mean_per_batch.expand_as(z), reduction="none")
+        if keep_batch:
+            return dist.sum(dim=(1, 2))
+        else:
+            return dist.sum()
+
 class PoissonLoss(nn.Module):
     def __init__(self, n_snps: int = 32):
         super(PoissonLoss, self).__init__()
