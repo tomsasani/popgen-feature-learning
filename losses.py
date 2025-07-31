@@ -8,21 +8,24 @@ DEVICE = torch.device("cuda")
 
 def off_diagonal(x):
     # return a flattened view of the off-diagonal elements of a square matrix
-    b, n, m = x.shape
+    n, m = x.shape
     assert n == m
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
 class BarlowTwinsLoss(nn.Module):
-    def __init__(self, projection_dim: int = 32, lmbda: float = 0.0051):
+    def __init__(self, lmbda: float = 0.0051):
         super(BarlowTwinsLoss, self).__init__()
-        self.bn = nn.BatchNorm1d(projection_dim, affine=False)
         self.lmbda = lmbda
 
     def forward(self, z1, z2):
         # z1 and z2 are the projections from each view, which
         # should be batchnormed
         B, D = z1.shape
+
+        if B > 1:
+            z1 = (z1 - z1.mean(0)) / z1.std(0)
+            z2 = (z2 - z2.mean(0)) / z2.std(0)
 
         # empirical cross-correlation matrix
         c = z1.T @ z2
@@ -32,7 +35,6 @@ class BarlowTwinsLoss(nn.Module):
 
         # sum the cross-correlation matrix between all gpus
         c_diff = (c - torch.eye(D).to(DEVICE)).pow(2)
-        
         on_diag = torch.diagonal(c_diff).sum()
         off_diag = off_diagonal(c_diff).sum()
         loss = on_diag + self.lmbda * off_diag
@@ -174,9 +176,9 @@ class SimCLRLoss(nn.Module):
         super(SimCLRLoss, self).__init__()
         self.temperature = temperature
 
-    def forward(self, feats):
+    def forward(self, z1, z2):
         # Calculate cosine similarity
-        cos_sim = F.cosine_similarity(feats[:, None], feats[None, :], dim=-1)
+        cos_sim = F.cosine_similarity(z1, z2)#, dim=-1)
         # Mask out cosine similarity to itself
         self_mask = torch.eye(cos_sim.shape[0], dtype=torch.bool, device=DEVICE)
         cos_sim.masked_fill_(self_mask, -9e15)
