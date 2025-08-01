@@ -185,8 +185,8 @@ class RealData(object):
                 return (None, None, None)
             
         # ignore fixed sites
-        if np.sum(haplotypes) == keep_idxs.shape[0]:
-            return (None, None, None)
+        # if np.sum(haplotypes) == keep_idxs.shape[0]:
+        #     return (None, None, None)
         if np.sum(haplotypes) == 0:
             return (None, None, None)
 

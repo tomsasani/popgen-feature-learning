@@ -19,13 +19,13 @@ def prep_simulated_region(
     site_table = ts.tables.sites
     positions = site_table.position.astype(np.int64)
 
-    seg = util.find_segregating_idxs(
-        X,
-        filter_singletons=filter_singletons,
-    )
+    # seg = util.find_segregating_idxs(
+    #     X,
+    #     filter_singletons=filter_singletons,
+    # )
 
-    X = X[seg, :]
-    positions = positions[seg]
+    # X = X[seg, :]
+    # positions = positions[seg]
 
     assert positions.shape[0] == X.shape[0]
 
@@ -35,16 +35,10 @@ def prep_simulated_region(
 species = stdpopsim.get_species("HomSap")
 model = species.get_demographic_model("OutOfAfrica_3G09")
 
-# Get a chromosome (e.g., chromosome 22)
-# chrom = species.genome.get_chromosome("chr22")
-
 samples_per_population = [0, 0, 0]
-# samples_per_population[pcs] = N_SMPS
-
 pop2i = dict(zip(["YRI", "CEU", "CHB"], range(3)))
 popi = pop2i[snakemake.wildcards.population]
-
-samples_per_population[popi] = 100
+samples_per_population[popi] = int(snakemake.params.n_haps)
 samples = dict(zip(["YRI", "CEU", "CHB"], samples_per_population))
 
 # Simulate tree sequence
@@ -57,11 +51,17 @@ counted = 0
 
 outfh = open(snakemake.output.fh, "w")
 
-while counted < 20_000:
+while counted < int(snakemake.params.n_replicates):
 
+    left = rng.integers(0, 200_000_000)
+    right = left + 100_000
+
+    # Get a chromosome (e.g., chromosome 22)
     contig = species.get_contig(
-        length=100_000,
-        recombination_rate=rng.uniform(1e-8, 1.5e-8),
+        snakemake.params.chrom,
+        left=left,
+        right=right,
+        genetic_map="HapMapII_GRCh37",
         mutation_rate=2.35e-8,
     )
 
@@ -72,7 +72,9 @@ while counted < 20_000:
         filter_singletons=False,
     )
 
-    X, _ = util.major_minor(X.T)
+    X[X > 1] = 1
+
+    X = X.T
 
     ref_alleles = np.zeros(X.shape[1])
     region = util.process_region(
@@ -92,14 +94,14 @@ while counted < 20_000:
         continue
 
     if counted % 100 == 0:
-        print(counted)
+        print(left, right, counted)
 
     region = np.transpose(region, (1, 2, 0))
     region = np.uint8(region * 255)
 
     img = Image.fromarray(region, mode="RGB")
 
-    img.save(f"{snakemake.params.pref}/{snakemake.wildcards.population}/{snakemake.wildcards.chrom}/{snakemake.wildcards.n_snps}/{counted}.png")
+    img.save(f"{snakemake.params.pref}/{counted}.png")
 
     print (f"{counted}", file=outfh)
 

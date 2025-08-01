@@ -4,6 +4,8 @@ import numpy as np
 from PIL import Image
 import global_vars
 import stdpopsim
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def prep_simulated_region(
     ts,
@@ -18,13 +20,13 @@ def prep_simulated_region(
     site_table = ts.tables.sites
     positions = site_table.position.astype(np.int64)
 
-    seg = util.find_segregating_idxs(
-        X,
-        filter_singletons=filter_singletons,
-    )
+    # seg = util.find_segregating_idxs(
+    #     X,
+    #     filter_singletons=filter_singletons,
+    # )
 
-    X = X[seg, :]
-    positions = positions[seg]
+    # X = X[seg, :]
+    # positions = positions[seg]
 
     assert positions.shape[0] == X.shape[0]
 
@@ -41,29 +43,13 @@ model = species.get_demographic_model("OutOfAfrica_3G09")
 
 chrom = snakemake.params.chrom
 
-# left = rng.integers(1, 230_000_000)
-# right = left + 500_000
-
-left = 50_000_000
-right = 50_500_000
-
 coef = int(snakemake.wildcards.raw_coef) / 1_000
-
-contig = species.get_contig(
-    chrom,
-    left=left,
-    right=right,
-    genetic_map="HapMapII_GRCh37",
-    mutation_rate=2.35e-8,
-)
 
 # dfe = species.get_dfe("Gamma_K17")
 # exons = species.get_annotations("ensembl_havana_104_exons")
 # exon_intervals = exons.get_chromosome_annotations(chrom)
 # contig.add_dfe(intervals=exon_intervals, DFE=dfe)
 engine = stdpopsim.get_engine("slim") 
-
-coord = (left + right) // 2
 
 extended_events = None
 if simulate_sweep:
@@ -73,27 +59,40 @@ if simulate_sweep:
     T_f = (
         4 * (np.log(gamma) + 0.5772 - (1 / gamma)) / coef
     )  
+    print (T_f, coef)
     extended_events = stdpopsim.selection.selective_sweep(
         single_site_id="sweep",
         population="CEU",
         selection_coeff=coef,
         mutation_generation_ago=T_f,
-        # min_freq_at_end=0.8,
+        min_freq_at_end=0.5,
     )
-
-    # add the site
-    contig.add_single_site(id="sweep", coordinate=coord)
 
 pop_sizes = [0, 0, 0]
 pop2i = {"YRI": 0, "CEU": 1, "CHB": 2}
-pop_sizes[pop2i[snakemake.wildcards.population]] = snakemake.params.n_haps
-
+pop_sizes[pop2i[snakemake.wildcards.population]] = int(snakemake.params.n_haps)
 samples = dict(zip(pop2i.keys(), pop_sizes))
+print (samples)
 
 outfh = open(snakemake.output.fh, "w")
 
 counted = 0
 while counted < int(snakemake.params.n_replicates):
+
+    left = rng.integers(0, 200_000_000)
+    right = left + 100_000
+    coord = (left + right) // 2
+
+    contig = species.get_contig(
+        chrom,
+        left=left,
+        right=right,
+        genetic_map="HapMapII_GRCh37",
+        mutation_rate=2.35e-8,
+    )
+    if simulate_sweep:
+        # add the site
+        contig.add_single_site(id="sweep", coordinate=coord)
 
     engine_seed = int(rng.integers(0, 2**32))
 
@@ -109,11 +108,19 @@ while counted < int(snakemake.params.n_replicates):
         slim_burn_in=2,
     )
 
-
     X, positions = prep_simulated_region(
         ts,
         filter_singletons=False,
     )
+
+    X[X > 1] = 1
+
+
+    print (positions.shape, np.where(positions == coord))
+
+    # f, ax = plt.subplots()
+    # sns.heatmap(X.T, ax=ax)
+    # f.savefig(f"{snakemake.params.pref}/{counted}.raw.png")
 
     dists = util.inter_snp_distances(positions, norm_len=1)
 
@@ -142,6 +149,6 @@ while counted < int(snakemake.params.n_replicates):
 
     print (f"{chrom}:{left}-{right}\t{counted}", file=outfh)
 
-    img.save(f"{snakemake.params.pref}/{snakemake.wildcards.population}/{snakemake.wildcards.n_snps}/{snakemake.wildcards.raw_coef}/{counted}.png")
+    img.save(f"{snakemake.params.pref}/{counted}.png")
 
     counted += 1
