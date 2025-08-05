@@ -12,6 +12,36 @@ def off_diagonal(x):
     assert n == m
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
+class MAELoss(nn.Module):
+    def __init__(self):
+        super(MAELoss, self).__init__()
+
+    def patchify(self, imgs):
+        """
+        imgs: (N, 3, H, W)
+        x: (N, L, patch_size**2 *3)
+        """
+        B, C, H, W = imgs.shape
+        x = imgs.permute(0, 2, 3, 1)  # B, H, W, C
+
+        # Flatten each patch (1, W, C) -> (W * C)
+        x = x.reshape(B, H, W * C)    # B, H, W*C
+        return x
+    
+    def forward(self, pred, target, mask):
+        # B, C, H, W is shape of target
+        # B, H, CW is shape of pred
+        # mask is shape B, H
+        B, C, H, W = target.shape
+
+        target = self.patchify(target)
+
+        loss = (pred - target) ** 2
+        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        
+        loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        # print (loss)
+        return loss
 
 class BarlowTwinsLoss(nn.Module):
     def __init__(self, lmbda: float = 0.0051):
@@ -23,9 +53,9 @@ class BarlowTwinsLoss(nn.Module):
         # should be batchnormed
         B, D = z1.shape
 
-        if B > 1:
-            z1 = (z1 - z1.mean(0)) / z1.std(0)
-            z2 = (z2 - z2.mean(0)) / z2.std(0)
+       
+        z1 = (z1 - z1.mean(0)) / z1.std(0)
+        z2 = (z2 - z2.mean(0)) / z2.std(0)
 
         # empirical cross-correlation matrix
         c = z1.T @ z2
@@ -274,3 +304,17 @@ class DiscriminatorLoss(nn.Module):
         )
 
         return (orig_loss + recon_loss) / 2.0
+
+
+if __name__ == "__main__":
+    loss_fn = MAELoss()
+
+    device = torch.device("cpu")
+
+
+    target = torch.rand(size=(100, 1, 200, 32)).to(device)
+    pred = torch.rand(size=(100, 200, 32)).to(device)
+    mask = torch.rand(size=(100, 200)).to(device)
+    mask[mask < 0.5] = 0
+    mask[mask >= 0.5] = 1
+    print (loss_fn(pred, target, mask))
